@@ -221,7 +221,7 @@ namespace VirtualClient.Dependencies
                     commands.Add("apt update");
                     commands.Add("apt install build-essential -yq");
                     commands.Add("apt-get update");
-                    commands.Add("apt-get install jq");
+                    commands.Add("apt-get install jq --yes");
                     break;
 
                 case LinuxDistribution.CentOS7:
