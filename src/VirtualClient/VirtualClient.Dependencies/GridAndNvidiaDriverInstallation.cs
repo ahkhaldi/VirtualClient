@@ -281,7 +281,7 @@ namespace VirtualClient.Dependencies
             }
 
             commands.Add("chmod +x NVIDIA-Linux-x86_64-grid.run");
-            commands.Add("sudo ./NVIDIA-Linux-x86_64-grid.run");
+            commands.Add("./NVIDIA-Linux-x86_64-grid.run -s");
 
             return commands;
         }
