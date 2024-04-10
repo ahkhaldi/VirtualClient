@@ -7,11 +7,13 @@ namespace VirtualClient.Actions
     using System.Collections.Generic;
     using System.IO;
     using System.IO.Abstractions;
+    using System.Net.Http;
     using System.Runtime.InteropServices;
     using System.Threading;
     using System.Threading.Tasks;
     using Microsoft.CodeAnalysis;
     using Microsoft.Extensions.DependencyInjection;
+    using Polly;
     using VirtualClient.Common;
     using VirtualClient.Common.Extensions;
     using VirtualClient.Common.Platform;
@@ -175,6 +177,26 @@ namespace VirtualClient.Actions
 
                 await this.ExecuteSbCommandAsync("bash", $"initialize.sh {this.Username}", this.SuperBenchmarkDirectory, telemetryContext, cancellationToken, true);
                 await this.ExecuteSbCommandAsync("sb", $"deploy --host-list localhost -i {this.ContainerVersion}", this.SuperBenchmarkDirectory, telemetryContext, cancellationToken, false);
+
+                // download config file
+                if (this.ConfigurationFile.StartsWith("http"))
+                {
+                    var configFileUri = new Uri(this.ConfigurationFile);
+                    string configFileName = Path.GetFileName(configFileUri.AbsolutePath);
+                    string configFullPath = this.PlatformSpecifics.Combine(cloneDir, configFileName);
+
+                    using (var client = new HttpClient())
+                    {
+                        await Policy.Handle<Exception>().WaitAndRetryAsync(5, (retries) => TimeSpan.FromSeconds(retries * 2)).ExecuteAsync(async () =>
+                        {
+                            var response = await client.GetAsync(configFileUri);
+                            using (var fs = new FileStream(configFullPath, FileMode.Create, FileAccess.Write, FileShare.Write))
+                            {
+                                await response.Content.CopyToAsync(fs);
+                            }
+                        });
+                    }
+                }
 
                 state.SuperBenchmarkInitialized = true;
             }
