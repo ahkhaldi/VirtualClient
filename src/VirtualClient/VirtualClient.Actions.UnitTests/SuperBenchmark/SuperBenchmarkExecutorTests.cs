@@ -48,7 +48,7 @@ namespace VirtualClient.Actions
             {
                 { nameof(SuperBenchmarkExecutor.Version), "0.0.1" },
                 { nameof(SuperBenchmarkExecutor.ContainerVersion), "testContainer" },
-                { nameof(SuperBenchmarkExecutor.ConfigurationFileParameter), "Test.yaml" },
+                { nameof(SuperBenchmarkExecutor.ConfigurationFile), "Test.yaml" },
                 { nameof(SuperBenchmarkExecutor.Username), "testuser" }
             };
         }
@@ -76,7 +76,7 @@ namespace VirtualClient.Actions
             {
                 { nameof(SuperBenchmarkExecutor.Version), "1.2.3" },
                 { nameof(SuperBenchmarkExecutor.ContainerVersion), "testContainer" },
-                { nameof(SuperBenchmarkExecutor.ConfigurationFileParameter), "Test.yaml" },
+                { nameof(SuperBenchmarkExecutor.ConfigurationFile), "Test.yaml" },
                 { nameof(SuperBenchmarkExecutor.Username), "testuser" }
             };
             string expectedCommand = $"sudo git clone -b v1.2.3 https://github.com/microsoft/superbenchmark";

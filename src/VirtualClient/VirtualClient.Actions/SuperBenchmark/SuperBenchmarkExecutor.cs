@@ -76,11 +76,11 @@ namespace VirtualClient.Actions
         /// <summary>
         /// The superbench config name.
         /// </summary>
-        public string ConfigurationFileParameter
+        public string ConfigurationFile
         {
             get
             {
-                this.Parameters.TryGetValue(nameof(SuperBenchmarkExecutor.ConfigurationFileParameter), out IConvertible config);
+                this.Parameters.TryGetValue(nameof(SuperBenchmarkExecutor.ConfigurationFile), out IConvertible config);
                 return config?.ToString();
             }
         }
@@ -169,11 +169,6 @@ namespace VirtualClient.Actions
                     await this.ExecuteSbCommandAsync("git", $"clone -b v{this.Version} https://github.com/microsoft/superbenchmark", this.PlatformSpecifics.PackagesDirectory, telemetryContext, cancellationToken, true);
                 }
 
-                if (!this.fileSystem.Directory.Exists(this.PlatformSpecifics.ScriptsDirectory))
-                {
-                    this.fileSystem.Directory.CreateDirectory(this.PlatformSpecifics.ScriptsDirectory);
-                }
-
                 foreach (string file in this.fileSystem.Directory.GetFiles(this.PlatformSpecifics.GetScriptPath("superbenchmark")))
                 {
                     this.fileSystem.File.Copy(
@@ -186,9 +181,9 @@ namespace VirtualClient.Actions
                 await this.ExecuteSbCommandAsync("sb", $"deploy --host-list localhost -i {this.ContainerVersion}", this.SuperBenchmarkDirectory, telemetryContext, cancellationToken, false);
 
                 // download config file
-                if (this.ConfigurationFileParameter.StartsWith("http"))
+                if (this.ConfigurationFile.StartsWith("http"))
                 {
-                    var configFileUri = new Uri(this.ConfigurationFileParameter);
+                    var configFileUri = new Uri(this.ConfigurationFile);
                     string configFileName = Path.GetFileName(configFileUri.AbsolutePath);
                     string configFullPath = this.PlatformSpecifics.Combine(cloneDir, configFileName);
 
@@ -208,7 +203,7 @@ namespace VirtualClient.Actions
                 }
                 else
                 {
-                    this.configFileFullPath = this.ConfigurationFileParameter;
+                    this.configFileFullPath = this.ConfigurationFile;
                 }
 
                 state.SuperBenchmarkInitialized = true;
