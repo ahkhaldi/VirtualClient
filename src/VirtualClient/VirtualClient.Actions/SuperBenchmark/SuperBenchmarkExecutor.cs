@@ -28,6 +28,7 @@ namespace VirtualClient.Actions
     public class SuperBenchmarkExecutor : VirtualClientComponent
     {
         private const string SuperBenchmarkRunShell = "RunSuperBenchmark.sh";
+        private string configFileFullPath;
 
         private IFileSystem fileSystem;
         private IPackageManager packageManager;
@@ -75,11 +76,11 @@ namespace VirtualClient.Actions
         /// <summary>
         /// The superbench config name.
         /// </summary>
-        public string ConfigurationFile
+        public string ConfigurationFileParameter
         {
             get
             {
-                this.Parameters.TryGetValue(nameof(SuperBenchmarkExecutor.ConfigurationFile), out IConvertible config);
+                this.Parameters.TryGetValue(nameof(SuperBenchmarkExecutor.ConfigurationFileParameter), out IConvertible config);
                 return config?.ToString();
             }
         }
@@ -160,11 +161,17 @@ namespace VirtualClient.Actions
             {
                 // This is to grant directory folders for 
                 await this.systemManager.MakeFilesExecutableAsync(this.PlatformSpecifics.CurrentDirectory, this.Platform, cancellationToken);
-
+                
                 string cloneDir = this.PlatformSpecifics.Combine(this.PlatformSpecifics.PackagesDirectory, "superbenchmark");
+
                 if (!this.fileSystem.Directory.Exists(cloneDir))
                 {
                     await this.ExecuteSbCommandAsync("git", $"clone -b v{this.Version} https://github.com/microsoft/superbenchmark", this.PlatformSpecifics.PackagesDirectory, telemetryContext, cancellationToken, true);
+                }
+
+                if (!this.fileSystem.Directory.Exists(this.PlatformSpecifics.ScriptsDirectory))
+                {
+                    this.fileSystem.Directory.CreateDirectory(this.PlatformSpecifics.ScriptsDirectory);
                 }
 
                 foreach (string file in this.fileSystem.Directory.GetFiles(this.PlatformSpecifics.GetScriptPath("superbenchmark")))
@@ -179,9 +186,9 @@ namespace VirtualClient.Actions
                 await this.ExecuteSbCommandAsync("sb", $"deploy --host-list localhost -i {this.ContainerVersion}", this.SuperBenchmarkDirectory, telemetryContext, cancellationToken, false);
 
                 // download config file
-                if (this.ConfigurationFile.StartsWith("http"))
+                if (this.ConfigurationFileParameter.StartsWith("http"))
                 {
-                    var configFileUri = new Uri(this.ConfigurationFile);
+                    var configFileUri = new Uri(this.ConfigurationFileParameter);
                     string configFileName = Path.GetFileName(configFileUri.AbsolutePath);
                     string configFullPath = this.PlatformSpecifics.Combine(cloneDir, configFileName);
 
@@ -196,6 +203,12 @@ namespace VirtualClient.Actions
                             }
                         });
                     }
+
+                    this.configFileFullPath = configFullPath;
+                }
+                else
+                {
+                    this.configFileFullPath = this.ConfigurationFileParameter;
                 }
 
                 state.SuperBenchmarkInitialized = true;
@@ -260,7 +273,7 @@ namespace VirtualClient.Actions
                         process.StartTime,
                         process.ExitTime,
                         metrics,
-                        metricCategorization: $"{this.ConfigurationFile}",
+                        metricCategorization: $"{this.configFileFullPath}",
                         scenarioArguments: commandArguments,
                         this.Tags,
                         telemetryContext);
@@ -272,7 +285,7 @@ namespace VirtualClient.Actions
 
         private string GetCommandLineArguments()
         {
-            return @$"run --host-list localhost -c {this.ConfigurationFile}";
+            return @$"run --host-list localhost -c {this.configFileFullPath}";
         }
 
         internal class SuperBenchmarkState : State
