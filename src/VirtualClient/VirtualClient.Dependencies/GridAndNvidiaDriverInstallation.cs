@@ -6,9 +6,11 @@ namespace VirtualClient.Dependencies
     using System;
     using System.Collections.Generic;
     using System.IO;
+    using System.Linq;
     using System.Text.RegularExpressions;
     using System.Threading;
     using System.Threading.Tasks;
+    using MathNet.Numerics.OdeSolvers;
     using Microsoft.Extensions.DependencyInjection;
     using Polly;
     using VirtualClient.Common;
@@ -164,27 +166,18 @@ namespace VirtualClient.Dependencies
 
         private async Task<bool> CheckIfDriverInstalledAsync(EventContext telemetryContext, CancellationToken cancellationToken)
         {
-            string unixCommand = "nvidia-smi -q | grep \"\"Driver Version\"\"";
+            string driverVersionCommand = this.Platform == PlatformID.Unix ? "-c nvidia-smi --query-gpu=driver_version --format=csv,noheader" : "nvidia-smi --query-gpu=driver_version --format=csv,noheader";
+            string shell = this.Platform == PlatformID.Unix ? "bash" : "powershell";
 
-            string executeCommand = this.Platform == PlatformID.Unix ? $"bash -c \"{unixCommand}\"" : "C:\\Windows\\System32\\nvidia-smi.exe";
+            var process = await this.ExecuteCommandAsync("shell", driverVersionCommand, Environment.CurrentDirectory, telemetryContext, cancellationToken)
+                .ConfigureAwait(false);
 
-            try
+            if (ProcessProxy.DefaultSuccessCodes.Contains(process.ExitCode))
             {
-                string output = await this.ExecuteCommandAsync(executeCommand, null, Environment.CurrentDirectory, telemetryContext, cancellationToken)
-                    .ConfigureAwait(false);
-
-                string pattern = @"Driver Version\s*:\s*(\d+\.\d+(?:\.\d+)?)";
-                Match match = Regex.Match(output, pattern);
-
-                if (match.Success)
-                {
-                    string driverVersion = match.Groups[1].Value;
-                    this.Logger.LogSystemEvents($"NVIDIA driver {driverVersion} detected", new Dictionary<string, object> { { "DriverVersion", driverVersion } }, telemetryContext);
-                }
-
-                return output.Contains(this.DriverVersion);
+                this.Logger.LogSystemEvents($"NVIDIA driver detected", new Dictionary<string, object> { { "DriverVersion", process.StandardOutput.ToString().Trim() } }, telemetryContext);
+                return true;
             }
-            catch (Exception)
+            else
             {
                 return false;
             }
@@ -301,31 +294,6 @@ namespace VirtualClient.Dependencies
 
             await this.ExecuteCommandAsync(filename, "-y -s", Environment.CurrentDirectory, telemetryContext, cancellationToken)
                 .ConfigureAwait(false);
-        }
-
-        private Task<string> ExecuteCommandAsync(string commandLine, string commandLineArgs, string workingDirectory, EventContext telemetryContext, CancellationToken cancellationToken)
-        {
-            return (Task<string>)this.RetryPolicy.ExecuteAsync(async () =>
-            {
-                using (IProcessProxy process = this.systemManager.ProcessManager.CreateElevatedProcess(this.Platform, commandLine, commandLineArgs, workingDirectory))
-                {
-                    this.CleanupTasks.Add(() => process.SafeKill());
-                    this.LogProcessTrace(process);
-
-                    await process.StartAndWaitAsync(cancellationToken)
-                        .ConfigureAwait(false);
-
-                    if (!cancellationToken.IsCancellationRequested)
-                    {
-                        await this.LogProcessDetailsAsync(process, telemetryContext, "GpuDriverInstallation")
-                            .ConfigureAwait(false);
-
-                        process.ThrowIfErrored<DependencyException>(errorReason: ErrorReason.DependencyInstallationFailed);
-                    }
-
-                    return process.StandardOutput.ToString();
-                }
-            });
         }
     }
 }
