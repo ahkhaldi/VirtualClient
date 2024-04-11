@@ -10,6 +10,7 @@ namespace VirtualClient.Dependencies
     using System.IO.Abstractions;
     using System.Linq;
     using System.Net.Http;
+    using System.Text.RegularExpressions;
     using System.Threading;
     using System.Threading.Tasks;
     using Microsoft.CodeAnalysis;
@@ -104,6 +105,7 @@ namespace VirtualClient.Dependencies
             {
                 switch (this.Platform)
                 {
+                    case PlatformID.Unix:
                     case PlatformID.Win32NT:
                         return this.Parameters.GetValue<bool>(nameof(CudaAndNvidiaGPUDriverInstallation.RebootRequired), false);
 
@@ -144,10 +146,9 @@ namespace VirtualClient.Dependencies
         {
             this.Logger.LogTraceMessage($"{this.TypeName}.ExecutionStarted", telemetryContext);
 
-            State installationState = await this.stateManager.GetStateAsync<State>(nameof(CudaAndNvidiaGPUDriverInstallation), cancellationToken)
-                .ConfigureAwait(false);
+            bool isDriverInstalled = await this.CheckIfDriverInstalledAsync(telemetryContext, cancellationToken);
 
-            if (installationState == null)
+            if (isDriverInstalled == false)
             {
                 if (this.Platform == PlatformID.Unix)
                 {
@@ -173,25 +174,61 @@ namespace VirtualClient.Dependencies
                                 ErrorReason.LinuxDistributionNotSupported);
                     }
 
-                    await this.InstallCudaAndDriversAsync(linuxDistributionInfo.LinuxDistribution, telemetryContext, cancellationToken)
-                        .ConfigureAwait(false);
+                    await this.HoldKernelPackage(linuxDistributionInfo.LinuxDistribution, telemetryContext, cancellationToken);
 
-                    await this.stateManager.SaveStateAsync(nameof(CudaAndNvidiaGPUDriverInstallation), new State(), cancellationToken)
+                    await this.InstallCudaAndDriversAsync(linuxDistributionInfo.LinuxDistribution, telemetryContext, cancellationToken)
                         .ConfigureAwait(false);
                 }
                 else if (this.Platform == PlatformID.Win32NT)
                 {
                     await this.CudaAndNvidiaGPUDriverInstallationOnWindowsAsync(telemetryContext, cancellationToken)
                                .ConfigureAwait(false);
+                }
 
-                    await this.stateManager.SaveStateAsync(nameof(CudaAndNvidiaGPUDriverInstallation), new State(), cancellationToken)
-                        .ConfigureAwait(false);
+                isDriverInstalled = await this.CheckIfDriverInstalledAsync(telemetryContext, cancellationToken);
+
+                if (isDriverInstalled == false)
+                {
+                    throw new DependencyException("Failed to install NVIDIA driver");
                 }
 
                 VirtualClientRuntime.IsRebootRequested = this.RebootRequired;
             }
 
             this.Logger.LogTraceMessage($"{this.TypeName}.ExecutionCompleted", telemetryContext);
+        }
+
+        private async Task<bool> CheckIfDriverInstalledAsync(EventContext telemetryContext, CancellationToken cancellationToken)
+        {
+            string unixCommand = "nvidia-smi -q | grep \"\"Driver Version\"\"";
+
+            string executeCommand = this.Platform == PlatformID.Unix ? $"bash -c \"{unixCommand}\"" : "C:\\Windows\\System32\\nvidia-smi.exe";
+
+            try
+            {
+                string output = await this.ExecuteCommandAsync(executeCommand, null, Environment.CurrentDirectory, telemetryContext, cancellationToken)
+                    .ConfigureAwait(false);
+
+                string pattern = @"Driver Version\s*:\s*(\d+\.\d+(?:\.\d+)?)";
+                Match match = Regex.Match(output, pattern);
+
+                if (match.Success)
+                {
+                    string driverVersion = match.Groups[1].Value;
+                    this.Logger.LogSystemEvents($"NVIDIA driver {driverVersion} detected", new Dictionary<string, object> { { "DriverVersion", driverVersion } }, telemetryContext);
+
+                    if (!output.Contains(this.LinuxDriverVersion))
+                    {
+                        this.Logger.LogSystemEvents($"WARNING: NVIDIA driver {driverVersion} installed mismatches tested driver version {this.LinuxDriverVersion}", new Dictionary<string, object> { { "DriverVersion", driverVersion } }, telemetryContext);
+                    }
+                }
+
+                return true;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
         }
 
         [SuppressMessage("StyleCop.CSharp.ReadabilityRules", "SA1118:Parameter should not span multiple lines", Justification = "Readability")]
@@ -250,6 +287,34 @@ namespace VirtualClient.Dependencies
                         .ConfigureAwait(false);
                 }
             }
+        }
+
+        private async Task HoldKernelPackage(LinuxDistribution linuxDistribution, EventContext telemetryContext, CancellationToken cancellationToken)
+        {
+            string command = string.Empty;
+
+            switch (linuxDistribution)
+            {
+                case LinuxDistribution.Ubuntu:
+                    command = "apt-mark hold";
+                    break;
+
+                case LinuxDistribution.CentOS7:
+                case LinuxDistribution.CentOS8:
+                case LinuxDistribution.RHEL7:
+                case LinuxDistribution.RHEL8:
+                    command = "dnf versionlock add";
+                    break;
+            }
+
+            string kernelVersion = await this.ExecuteCommandAsync("uname -r", null, Environment.CurrentDirectory, telemetryContext, cancellationToken)
+                .ConfigureAwait(false);
+
+            await this.ExecuteCommandAsync($"{command} linux-image-{kernelVersion}", null, Environment.CurrentDirectory, telemetryContext, cancellationToken)
+                .ConfigureAwait(false);
+
+            await this.ExecuteCommandAsync($"{command} linux-headers-{kernelVersion}", null, Environment.CurrentDirectory, telemetryContext, cancellationToken)
+                .ConfigureAwait(false);
         }
 
         private List<string> CleanupCommands(LinuxDistribution linuxDistribution)
@@ -401,9 +466,9 @@ namespace VirtualClient.Dependencies
                 .ConfigureAwait(false);
         }
 
-        private Task ExecuteCommandAsync(string commandLine, string commandLineArgs, string workingDirectory, EventContext telemetryContext, CancellationToken cancellationToken)
+        private Task<string> ExecuteCommandAsync(string commandLine, string commandLineArgs, string workingDirectory, EventContext telemetryContext, CancellationToken cancellationToken)
         {
-            return this.RetryPolicy.ExecuteAsync(async () =>
+            return (Task<string>)this.RetryPolicy.ExecuteAsync(async () =>
             {
                 string output = string.Empty;
                 using (IProcessProxy process = this.systemManager.ProcessManager.CreateElevatedProcess(this.Platform, commandLine, commandLineArgs, workingDirectory))
@@ -421,6 +486,8 @@ namespace VirtualClient.Dependencies
 
                         process.ThrowIfErrored<DependencyException>(errorReason: ErrorReason.DependencyInstallationFailed);
                     }
+
+                    return process.StandardOutput.ToString();
                 }
             });
         }

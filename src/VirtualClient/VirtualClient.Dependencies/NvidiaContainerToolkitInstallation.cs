@@ -5,6 +5,7 @@ namespace VirtualClient.Dependencies
 {
     using System;
     using System.Collections.Generic;
+    using System.Text.RegularExpressions;
     using System.Threading;
     using System.Threading.Tasks;
     using Microsoft.Extensions.DependencyInjection;
@@ -49,48 +50,51 @@ namespace VirtualClient.Dependencies
         {
             this.Logger.LogTraceMessage($"{this.TypeName}.ExecutionStarted", telemetryContext);
 
-            State installationState = await this.stateManager.GetStateAsync<State>(nameof(NvidiaContainerToolkitInstallation), cancellationToken)
-                .ConfigureAwait(false);
-
-            if (installationState == null)
+            if (this.Platform == PlatformID.Unix)
             {
-                if (this.Platform == PlatformID.Unix)
+                LinuxDistributionInfo distroInfo = await this.systemManager.GetLinuxDistributionAsync(cancellationToken)
+                    .ConfigureAwait(false);
+
+                telemetryContext.AddContext("linuxDistribution", distroInfo.LinuxDistribution);
+
+                switch (distroInfo.LinuxDistribution)
                 {
-                    LinuxDistributionInfo distroInfo = await this.systemManager.GetLinuxDistributionAsync(cancellationToken)
-                        .ConfigureAwait(false);
+                    case LinuxDistribution.Ubuntu:
+                    case LinuxDistribution.Debian:
+                    case LinuxDistribution.CentOS8:
+                    case LinuxDistribution.CentOS7:
+                    case LinuxDistribution.RHEL7:
+                    case LinuxDistribution.SUSE:
+                        break;
 
-                    telemetryContext.AddContext("linuxDistribution", distroInfo.LinuxDistribution);
+                    default:
+                        // different distro installation to be addded.
+                        throw new WorkloadException(
+                            $"Nvidia Container Toolkit Installation is not supported by Virtual Client on the current Linux distro '{distroInfo.LinuxDistribution}'",
+                            ErrorReason.LinuxDistributionNotSupported);
+                }
 
-                    switch (distroInfo.LinuxDistribution)
-                    {
-                        case LinuxDistribution.Ubuntu:
-                        case LinuxDistribution.Debian:
-                        case LinuxDistribution.CentOS8:
-                        case LinuxDistribution.CentOS7:
-                        case LinuxDistribution.RHEL7:
-                        case LinuxDistribution.SUSE:
-                            break;
+                bool isNvidiaContainerToolkitInstalled = await this.CheckIfNvidiaContainerToolkitInstalledAsync(distroInfo.LinuxDistribution, telemetryContext, cancellationToken);
 
-                        default:
-                            // different distro installation to be addded.
-                            throw new WorkloadException(
-                                $"Nvidia Container Toolkit Installation is not supported by Virtual Client on the current Linux distro '{distroInfo.LinuxDistribution}'",
-                                ErrorReason.LinuxDistributionNotSupported);
-                    }
-
+                if (!isNvidiaContainerToolkitInstalled)
+                {
                     await this.NvidiaContainerToolkitInstallationAsync(distroInfo.LinuxDistribution, telemetryContext, cancellationToken)
                         .ConfigureAwait(false);
 
-                    await this.stateManager.SaveStateAsync(nameof(NvidiaContainerToolkitInstallation), new State(), cancellationToken)
-                        .ConfigureAwait(false);
+                    isNvidiaContainerToolkitInstalled = await this.CheckIfNvidiaContainerToolkitInstalledAsync(distroInfo.LinuxDistribution, telemetryContext, cancellationToken);
+
+                    if (isNvidiaContainerToolkitInstalled == false)
+                    {
+                        throw new DependencyException("Failed to install NVIDIA toolkit");
+                    }
                 }
-                else
-                {
-                    // CUDA and Nvidia driver installation for other platforms to be added.
-                    throw new WorkloadException(
-                        $"Nvidia Container Toolkit is not supported by Virtual Client on the current platform '{this.Platform}'.",
-                        ErrorReason.PlatformNotSupported);
-                }
+            }
+            else
+            {
+                // CUDA and Nvidia driver installation for other platforms to be added.
+                throw new WorkloadException(
+                    $"Nvidia Container Toolkit is not supported by Virtual Client on the current platform '{this.Platform}'.",
+                    ErrorReason.PlatformNotSupported);
             }
         }
 
@@ -183,11 +187,60 @@ namespace VirtualClient.Dependencies
             return commands;
         }
 
-        private Task ExecuteCommandAsync(string commandLine, string workingDirectory, EventContext telemetryContext, CancellationToken cancellationToken)
+        private async Task<bool> CheckIfNvidiaContainerToolkitInstalledAsync(LinuxDistribution linuxDistribution, EventContext telemetryContext, CancellationToken cancellationToken)
+        {
+            string unixCommand = string.Empty;
+
+            switch (linuxDistribution)
+            {
+                case LinuxDistribution.Ubuntu:
+                    unixCommand = "dpkg -l | grep -i \"nvidia-container-toolkit\"";
+                    break;
+                case LinuxDistribution.Debian:
+                    unixCommand = "dpkg -l | grep \"nvidia-container-toolkit\"";
+                    break;
+                case LinuxDistribution.CentOS8:
+                case LinuxDistribution.CentOS7:
+                case LinuxDistribution.RHEL7:
+                    unixCommand = "yum list installed | \"grep nvidia-container-toolkit\"";
+                    break;
+                case LinuxDistribution.SUSE:
+                    unixCommand = "zypper se -i | \"grep nvidia-container-toolkit\"";
+                    break;
+
+                default:
+                    return false;
+            }
+
+            string executeCommand = $"bash -c \"{unixCommand}\"";
+
+            try
+            {
+                string output = await this.ExecuteCommandAsync(executeCommand, Environment.CurrentDirectory, telemetryContext, cancellationToken)
+                    .ConfigureAwait(false);
+
+                string pattern = @"nvidia-container-toolkit\s+(\S+)";
+                Match match = Regex.Match(output, pattern);
+
+                if (match.Success)
+                {
+                    string version = match.Groups[1].Value;
+                    this.Logger.LogSystemEvents($"NVIDIA toolkit {version} detected", new Dictionary<string, object> { { "NvidiaToolkit", version } }, telemetryContext);
+                }
+                
+                return output.Contains("nvidia-container-toolkit");
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        private Task<string> ExecuteCommandAsync(string commandLine, string workingDirectory, EventContext telemetryContext, CancellationToken cancellationToken)
         {
             EventContext relatedContext = telemetryContext.Clone();
 
-            return this.RetryPolicy.ExecuteAsync(async () =>
+            return (Task<string>)this.RetryPolicy.ExecuteAsync(async () =>
             {
                 using (IProcessProxy process = this.systemManager.ProcessManager.CreateElevatedProcess(this.Platform, commandLine, null, workingDirectory))
                 {
@@ -204,6 +257,8 @@ namespace VirtualClient.Dependencies
 
                         process.ThrowIfErrored<DependencyException>(errorReason: ErrorReason.DependencyInstallationFailed);
                     }
+
+                    return process.StandardOutput.ToString();
                 }
             });
         }
