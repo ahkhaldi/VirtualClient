@@ -180,36 +180,37 @@ namespace VirtualClient.Actions
                 await this.ExecuteSbCommandAsync("bash", $"initialize.sh {this.Username}", this.SuperBenchmarkDirectory, telemetryContext, cancellationToken, true);
                 await this.ExecuteSbCommandAsync("sb", $"deploy --host-list localhost -i {this.ContainerVersion}", this.SuperBenchmarkDirectory, telemetryContext, cancellationToken, false);
 
-                // download config file
-                if (this.ConfigurationFile.StartsWith("http"))
-                {
-                    var configFileUri = new Uri(this.ConfigurationFile);
-                    string configFileName = Path.GetFileName(configFileUri.AbsolutePath);
-                    string configFullPath = this.PlatformSpecifics.Combine(cloneDir, configFileName);
-
-                    using (var client = new HttpClient())
-                    {
-                        await Policy.Handle<Exception>().WaitAndRetryAsync(5, (retries) => TimeSpan.FromSeconds(retries * 2)).ExecuteAsync(async () =>
-                        {
-                            var response = await client.GetAsync(configFileUri);
-                            using (var fs = new FileStream(configFullPath, FileMode.Create, FileAccess.Write, FileShare.Write))
-                            {
-                                await response.Content.CopyToAsync(fs);
-                            }
-                        });
-                    }
-
-                    this.configFileFullPath = configFullPath;
-                }
-                else
-                {
-                    this.configFileFullPath = this.ConfigurationFile;
-                }
-
                 state.SuperBenchmarkInitialized = true;
             }
 
+
             await this.stateManager.SaveStateAsync<SuperBenchmarkState>($"{nameof(SuperBenchmarkState)}", state, cancellationToken);
+
+            // download config file - do this everytime in case the config file is saved online and has changed.
+            if (this.ConfigurationFile.StartsWith("http"))
+            {
+                var configFileUri = new Uri(this.ConfigurationFile);
+                string configFileName = Path.GetFileName(configFileUri.AbsolutePath);
+                string configFullPath = this.PlatformSpecifics.Combine(this.PlatformSpecifics.PackagesDirectory, configFileName);
+
+                using (var client = new HttpClient())
+                {
+                    await Policy.Handle<Exception>().WaitAndRetryAsync(5, (retries) => TimeSpan.FromSeconds(retries * 2)).ExecuteAsync(async () =>
+                    {
+                        var response = await client.GetAsync(configFileUri);
+                        using (var fs = new FileStream(configFullPath, FileMode.Create, FileAccess.Write, FileShare.Write))
+                        {
+                            await response.Content.CopyToAsync(fs);
+                        }
+                    });
+                }
+
+                this.configFileFullPath = configFullPath;
+            }
+            else
+            {
+                this.configFileFullPath = this.ConfigurationFile;
+            }
         }
 
         /// <summary>
@@ -221,7 +222,6 @@ namespace VirtualClient.Actions
             bool isSupported = base.IsSupported()
                 && (this.Platform == PlatformID.Unix)
                 && (this.CpuArchitecture == Architecture.X64);
-
             if (!isSupported)
             {
                 this.Logger.LogNotSupported("SuperBenchmark", this.Platform, this.CpuArchitecture, EventContext.Persisted());
