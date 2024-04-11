@@ -183,7 +183,6 @@ namespace VirtualClient.Actions
                 state.SuperBenchmarkInitialized = true;
             }
 
-
             await this.stateManager.SaveStateAsync<SuperBenchmarkState>($"{nameof(SuperBenchmarkState)}", state, cancellationToken);
 
             // download config file - do this everytime in case the config file is saved online and has changed.
