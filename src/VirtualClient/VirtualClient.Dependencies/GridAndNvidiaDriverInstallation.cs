@@ -169,7 +169,7 @@ namespace VirtualClient.Dependencies
             string driverVersionCommand = this.Platform == PlatformID.Unix ? "-c nvidia-smi --query-gpu=driver_version --format=csv,noheader" : "nvidia-smi --query-gpu=driver_version --format=csv,noheader";
             string shell = this.Platform == PlatformID.Unix ? "bash" : "powershell";
 
-            var process = await this.ExecuteCommandAsync("shell", driverVersionCommand, Environment.CurrentDirectory, telemetryContext, cancellationToken)
+            var process = await this.ExecuteCommandAsync(shell, driverVersionCommand, Environment.CurrentDirectory, telemetryContext, cancellationToken)
                 .ConfigureAwait(false);
 
             if (ProcessProxy.DefaultSuccessCodes.Contains(process.ExitCode))
