@@ -12,6 +12,7 @@ namespace VirtualClient.Dependencies
     using System.Threading.Tasks;
     using MathNet.Numerics.OdeSolvers;
     using Microsoft.Extensions.DependencyInjection;
+    using Microsoft.Extensions.Logging;
     using Polly;
     using VirtualClient.Common;
     using VirtualClient.Common.Extensions;
@@ -142,6 +143,8 @@ namespace VirtualClient.Dependencies
                                 ErrorReason.LinuxDistributionNotSupported);
                     }
 
+                    await this.HoldKernelPackage(linuxDistributionInfo.LinuxDistribution, telemetryContext, cancellationToken);
+
                     await this.InstallGridDriverAsync(linuxDistributionInfo, telemetryContext, cancellationToken)
                         .ConfigureAwait(false);
                 }
@@ -174,7 +177,14 @@ namespace VirtualClient.Dependencies
 
             if (ProcessProxy.DefaultSuccessCodes.Contains(process.ExitCode))
             {
-                this.Logger.LogSystemEvents($"NVIDIA driver detected", new Dictionary<string, object> { { "DriverVersion", process.StandardOutput.ToString().Trim() } }, telemetryContext);
+                string driverVersion = process.StandardOutput.ToString().Trim();
+                if (driverVersion != (this.DriverVersion))
+                {
+                    this.Logger.LogWarning($"NVIDIA driver version mismatch: NVIDIA driver {driverVersion} installed mismatches tested driver version {this.DriverVersion}");
+                }
+
+                // Always log the current driver version to Events for telemetry purposes.
+                this.Logger.LogSystemEvents($"NVIDIA driver {driverVersion} detected", new Dictionary<string, object> { { "DriverVersion", process.StandardOutput.ToString().Trim() } }, telemetryContext);
                 return true;
             }
             else
@@ -204,6 +214,36 @@ namespace VirtualClient.Dependencies
             }
         }
 
+        private async Task HoldKernelPackage(LinuxDistribution linuxDistribution, EventContext telemetryContext, CancellationToken cancellationToken)
+        {
+            string command = string.Empty;
+
+            switch (linuxDistribution)
+            {
+                case LinuxDistribution.Ubuntu:
+                    command = "apt-mark hold";
+                    break;
+
+                case LinuxDistribution.CentOS7:
+                case LinuxDistribution.CentOS8:
+                case LinuxDistribution.RHEL7:
+                case LinuxDistribution.RHEL8:
+                    command = "dnf versionlock add";
+                    break;
+            }
+
+            var process = await this.ExecuteCommandAsync("uname -r", null, Environment.CurrentDirectory, telemetryContext, cancellationToken)
+                .ConfigureAwait(false);
+
+            string kernelVersion = process.StandardOutput.ToString();
+
+            await this.ExecuteCommandAsync($"{command} linux-image-{kernelVersion}", null, Environment.CurrentDirectory, telemetryContext, cancellationToken)
+                .ConfigureAwait(false);
+
+            await this.ExecuteCommandAsync($"{command} linux-headers-{kernelVersion}", null, Environment.CurrentDirectory, telemetryContext, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
         private List<string> PrerequisiteCommands(LinuxDistribution linuxDistribution)
         {
             List<string> commands = new List<string>();
@@ -224,7 +264,7 @@ namespace VirtualClient.Dependencies
                     commands.Add("yum check-update");
                     commands.Add("dnf install make automake gcc gcc-c++ kernel-devel");
                     commands.Add("yum install epel-release");
-                    commands.Add("yum install jq");
+                    commands.Add("yum install jq --yes");
                     break;
             }
 
@@ -274,7 +314,7 @@ namespace VirtualClient.Dependencies
             }
 
             commands.Add("chmod +x NVIDIA-Linux-x86_64-grid.run");
-            commands.Add("./NVIDIA-Linux-x86_64-grid.run -s");
+            commands.Add("sudo ./NVIDIA-Linux-x86_64-grid.run --silent");
 
             return commands;
         }
@@ -283,7 +323,16 @@ namespace VirtualClient.Dependencies
         {
             if (string.IsNullOrEmpty(this.ForwardLink))
             {
-                throw new DependencyException("Failed to driver installation forward link.");
+                string curlCommand = $"$response = Invoke-RestMethod -Uri {this.AzureRepository}; " +
+                      @"$filteredResponse = $response.OS | Where-Object { $_.Name -eq 'Windows' } | " +
+                      "ForEach-Object { $_.Version } | Where-Object { $_.Name -eq '2016/10' } | " +
+                      "ForEach-Object { $_.Driver } | Where-Object { $_.Type -eq 'GRID' } | " +
+                      "ForEach-Object { $_.Version } | Where-Object { $_.Num -eq " + $"'{this.DriverVersion}' " + "} | " +
+                      "ForEach-Object { $_.DirLink }; echo $filteredResponse";
+
+                var process = await this.ExecuteCommandAsync("powershell", curlCommand, Environment.CurrentDirectory, telemetryContext, cancellationToken)
+                    .ConfigureAwait(false);
+                this.ForwardLink = process.StandardOutput.ToString();
             }
 
             Uri uri = new Uri(this.ForwardLink);
@@ -292,7 +341,7 @@ namespace VirtualClient.Dependencies
             await this.ExecuteCommandAsync("C:\\Windows\\system32\\curl.exe", $"-o {filename} {this.ForwardLink}", Environment.CurrentDirectory, telemetryContext, cancellationToken)
                     .ConfigureAwait(false);
 
-            await this.ExecuteCommandAsync(filename, "-y -s", Environment.CurrentDirectory, telemetryContext, cancellationToken)
+            await this.ExecuteCommandAsync("powershell", $".\\{filename} -y -s", Environment.CurrentDirectory, telemetryContext, cancellationToken)
                 .ConfigureAwait(false);
         }
     }
