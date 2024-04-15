@@ -232,7 +232,7 @@ namespace VirtualClient.Dependencies
                     break;
             }
 
-            var process = await this.ExecuteCommandAsync("uname -r", null, Environment.CurrentDirectory, telemetryContext, cancellationToken)
+            var process = await this.ExecuteCommandAsync("bash -c \"uname -r\"", null, Environment.CurrentDirectory, telemetryContext, cancellationToken)
                 .ConfigureAwait(false);
 
             string kernelVersion = process.StandardOutput.ToString();
