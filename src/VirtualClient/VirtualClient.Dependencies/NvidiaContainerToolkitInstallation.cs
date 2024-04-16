@@ -5,6 +5,8 @@ namespace VirtualClient.Dependencies
 {
     using System;
     using System.Collections.Generic;
+    using System.Linq;
+    using System.Text.RegularExpressions;
     using System.Threading;
     using System.Threading.Tasks;
     using Microsoft.Extensions.DependencyInjection;
@@ -19,8 +21,9 @@ namespace VirtualClient.Dependencies
     /// </summary>
     public class NvidiaContainerToolkitInstallation : VirtualClientComponent
     {
+        private const string NvidiaContainerToolkit = "nvidia-container-toolkit";
+
         private ISystemManagement systemManager;
-        private IStateManager stateManager;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="NvidiaContainerToolkitInstallation"/> class.
@@ -32,7 +35,6 @@ namespace VirtualClient.Dependencies
         {
             this.RetryPolicy = Policy.Handle<Exception>().WaitAndRetryAsync(5, (retries) => TimeSpan.FromSeconds(retries + 1));
             this.systemManager = dependencies.GetService<ISystemManagement>();
-            this.stateManager = this.systemManager.StateManager;
         }
 
         /// <summary>
@@ -49,48 +51,51 @@ namespace VirtualClient.Dependencies
         {
             this.Logger.LogTraceMessage($"{this.TypeName}.ExecutionStarted", telemetryContext);
 
-            State installationState = await this.stateManager.GetStateAsync<State>(nameof(NvidiaContainerToolkitInstallation), cancellationToken)
-                .ConfigureAwait(false);
-
-            if (installationState == null)
+            if (this.Platform == PlatformID.Unix)
             {
-                if (this.Platform == PlatformID.Unix)
+                LinuxDistributionInfo distroInfo = await this.systemManager.GetLinuxDistributionAsync(cancellationToken)
+                    .ConfigureAwait(false);
+
+                telemetryContext.AddContext("linuxDistribution", distroInfo.LinuxDistribution);
+
+                switch (distroInfo.LinuxDistribution)
                 {
-                    LinuxDistributionInfo distroInfo = await this.systemManager.GetLinuxDistributionAsync(cancellationToken)
-                        .ConfigureAwait(false);
+                    case LinuxDistribution.Ubuntu:
+                    case LinuxDistribution.Debian:
+                    case LinuxDistribution.CentOS8:
+                    case LinuxDistribution.CentOS7:
+                    case LinuxDistribution.RHEL7:
+                    case LinuxDistribution.SUSE:
+                        break;
 
-                    telemetryContext.AddContext("linuxDistribution", distroInfo.LinuxDistribution);
+                    default:
+                        // different distro installation to be addded.
+                        throw new WorkloadException(
+                            $"Nvidia Container Toolkit Installation is not supported by Virtual Client on the current Linux distro '{distroInfo.LinuxDistribution}'",
+                            ErrorReason.LinuxDistributionNotSupported);
+                }
 
-                    switch (distroInfo.LinuxDistribution)
-                    {
-                        case LinuxDistribution.Ubuntu:
-                        case LinuxDistribution.Debian:
-                        case LinuxDistribution.CentOS8:
-                        case LinuxDistribution.CentOS7:
-                        case LinuxDistribution.RHEL7:
-                        case LinuxDistribution.SUSE:
-                            break;
+                bool isToolkitInstalled = await this.CheckIfNvidiaContainerToolkitInstalledAsync(distroInfo.LinuxDistribution, telemetryContext, cancellationToken);
 
-                        default:
-                            // different distro installation to be addded.
-                            throw new WorkloadException(
-                                $"Nvidia Container Toolkit Installation is not supported by Virtual Client on the current Linux distro '{distroInfo.LinuxDistribution}'",
-                                ErrorReason.LinuxDistributionNotSupported);
-                    }
-
+                if (!isToolkitInstalled)
+                {
                     await this.NvidiaContainerToolkitInstallationAsync(distroInfo.LinuxDistribution, telemetryContext, cancellationToken)
-                        .ConfigureAwait(false);
+                            .ConfigureAwait(false);
 
-                    await this.stateManager.SaveStateAsync(nameof(NvidiaContainerToolkitInstallation), new State(), cancellationToken)
-                        .ConfigureAwait(false);
+                    isToolkitInstalled = await this.CheckIfNvidiaContainerToolkitInstalledAsync(distroInfo.LinuxDistribution, telemetryContext, cancellationToken);
+
+                    if (isToolkitInstalled == false)
+                    {
+                        throw new DependencyException("Failed to install NVIDIA toolkit");
+                    }
                 }
-                else
-                {
-                    // CUDA and Nvidia driver installation for other platforms to be added.
-                    throw new WorkloadException(
-                        $"Nvidia Container Toolkit is not supported by Virtual Client on the current platform '{this.Platform}'.",
-                        ErrorReason.PlatformNotSupported);
-                }
+            }
+            else
+            {
+                // CUDA and Nvidia driver installation for other platforms to be added.
+                throw new WorkloadException(
+                    $"Nvidia Container Toolkit is not supported by Virtual Client on the current platform '{this.Platform}'.",
+                    ErrorReason.PlatformNotSupported);
             }
         }
 
@@ -100,7 +105,7 @@ namespace VirtualClient.Dependencies
 
             foreach (string command in installationCommands)
             {
-                await this.ExecuteCommandAsync(command, Environment.CurrentDirectory, telemetryContext, cancellationToken)
+                await this.ExecuteCommandAsync(command, null, Environment.CurrentDirectory, telemetryContext, cancellationToken, true)
                     .ConfigureAwait(false);
             }
         }
@@ -116,10 +121,10 @@ namespace VirtualClient.Dependencies
 
                     string setupCommand = "distribution=$(. /etc/os-release;echo $ID$VERSION_ID) && " +
                         "curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | " +
-                        "sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg --yes --no-tty && " +
+                        $"sudo gpg --dearmor -o /usr/share/keyrings/{NvidiaContainerToolkit}-keyring.gpg --yes --no-tty && " +
                         "curl -s -L https://nvidia.github.io/libnvidia-container/$distribution/libnvidia-container.list | " +
-                        "sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' |  " +
-                        "sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list";
+                        $"sed 's#deb https://#deb [signed-by=/usr/share/keyrings/{NvidiaContainerToolkit}-keyring.gpg] https://#g' |  " +
+                        $"sudo tee /etc/apt/sources.list.d/{NvidiaContainerToolkit}.list";
 
                     commands.Add($"bash -c \"{setupCommand}\"");
                     commands.Add("apt-get update");
@@ -132,7 +137,7 @@ namespace VirtualClient.Dependencies
 
                     setupCommand = "distribution=$(. /etc/os-release;echo $ID$VERSION_ID && " +
                         "curl -s -L https://nvidia.github.io/libnvidia-container/$distribution/libnvidia-container.repo | " +
-                        "sudo tee /etc/yum.repos.d/nvidia-container-toolkit.repo";
+                        $"sudo tee /etc/yum.repos.d/{NvidiaContainerToolkit}.repo";
 
                     commands.Add($"bash -c \"{setupCommand}\"");
                     commands.Add("yum clean expire-cache");
@@ -145,7 +150,7 @@ namespace VirtualClient.Dependencies
 
                     setupCommand = "distribution=$(. /etc/os-release;echo $ID$VERSION_ID && " +
                         "curl -s -L https://nvidia.github.io/libnvidia-container/$distribution/libnvidia-container.repo | " +
-                        "sudo tee /etc/yum.repos.d/nvidia-container-toolkit.repo";
+                        $"sudo tee /etc/yum.repos.d/{NvidiaContainerToolkit}.repo";
 
                     commands.Add($"bash -c \"{setupCommand}\"");
                     commands.Add("dnf clean expire-cache --refresh");
@@ -158,11 +163,11 @@ namespace VirtualClient.Dependencies
 
                     setupCommand = "distribution=$(. /etc/os-release;echo $ID$VERSION_ID) " +
                         "&& curl -s -L https://nvidia.github.io/libnvidia-container/$distribution/libnvidia-container.repo | " +
-                        "sudo tee /etc/yum.repos.d/nvidia-container-toolkit.repo";
+                        $"sudo tee /etc/yum.repos.d/{NvidiaContainerToolkit}.repo";
 
                     commands.Add($"bash -c \"{setupCommand}\"");
                     commands.Add("yum clean expire-cache");
-                    commands.Add("yum install nvidia-container-toolkit -y");
+                    commands.Add($"yum install {NvidiaContainerToolkit} -y");
                     commands.Add("systemctl restart docker");
 
                     break;
@@ -183,29 +188,55 @@ namespace VirtualClient.Dependencies
             return commands;
         }
 
-        private Task ExecuteCommandAsync(string commandLine, string workingDirectory, EventContext telemetryContext, CancellationToken cancellationToken)
+        private async Task<bool> CheckIfNvidiaContainerToolkitInstalledAsync(LinuxDistribution linuxDistribution, EventContext telemetryContext, CancellationToken cancellationToken)
         {
-            EventContext relatedContext = telemetryContext.Clone();
+            string unixCommand = string.Empty;
 
-            return this.RetryPolicy.ExecuteAsync(async () =>
+            switch (linuxDistribution)
             {
-                using (IProcessProxy process = this.systemManager.ProcessManager.CreateElevatedProcess(this.Platform, commandLine, null, workingDirectory))
+                case LinuxDistribution.Ubuntu:
+                    unixCommand = $"dpkg -l | grep -i \"{NvidiaContainerToolkit}\"";
+                    break;
+                case LinuxDistribution.Debian:
+                    unixCommand = $"dpkg -l | grep \"{NvidiaContainerToolkit}\"";
+                    break;
+                case LinuxDistribution.CentOS8:
+                case LinuxDistribution.CentOS7:
+                case LinuxDistribution.RHEL7:
+                    unixCommand = $"yum list installed | \"grep {NvidiaContainerToolkit}\"";
+                    break;
+                case LinuxDistribution.SUSE:
+                    unixCommand = $"zypper se -i | \"grep {NvidiaContainerToolkit}\"";
+                    break;
+
+                default:
+                    return false;
+            }
+
+            string executeCommand = $"bash -c \"{unixCommand}\"";
+
+            var process = await this.ExecuteCommandAsync(executeCommand, null, Environment.CurrentDirectory, telemetryContext, cancellationToken, true)
+                .ConfigureAwait(false);
+
+            if (ProcessProxy.DefaultSuccessCodes.Contains(process.ExitCode))
+            {
+                string output = process.StandardOutput.ToString();
+
+                string pattern = @"nvidia-container-toolkit\s+(\S+)";
+                Match match = Regex.Match(output, pattern);
+
+                if (match.Success)
                 {
-                    this.CleanupTasks.Add(() => process.SafeKill());
-                    this.LogProcessTrace(process);
-
-                    await process.StartAndWaitAsync(cancellationToken)
-                        .ConfigureAwait(false);
-
-                    if (!cancellationToken.IsCancellationRequested)
-                    {
-                        await this.LogProcessDetailsAsync(process, relatedContext, "NvidiaToolkitInstallation")
-                            .ConfigureAwait(false);
-
-                        process.ThrowIfErrored<DependencyException>(errorReason: ErrorReason.DependencyInstallationFailed);
-                    }
+                    string version = match.Groups[1].Value;
+                    this.Logger.LogSystemEvents($"NVIDIA toolkit {version} detected", new Dictionary<string, object> { { "NvidiaToolkit", version } }, telemetryContext);
                 }
-            });
+
+                return output.Contains(NvidiaContainerToolkit);
+            }
+            else
+            {
+                return false;
+            }
         }
     }
 }

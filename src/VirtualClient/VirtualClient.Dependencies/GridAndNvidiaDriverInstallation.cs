@@ -19,7 +19,10 @@ namespace VirtualClient.Dependencies
     using VirtualClient.Common.Telemetry;
     using VirtualClient.Contracts;
 
-    internal class GridAndNvidiaDriverInstallation : VirtualClientComponent
+    /// <summary>
+    /// Provides functionality for installing Nvidia Grid GPU driver.
+    /// </summary>
+    public class GridAndNvidiaDriverInstallation : NvidiaGPUDriverInstallation
     {
         private ISystemManagement systemManager;
 
@@ -31,24 +34,7 @@ namespace VirtualClient.Dependencies
         public GridAndNvidiaDriverInstallation(IServiceCollection dependencies, IDictionary<string, IConvertible> parameters)
             : base(dependencies, parameters)
         {
-            this.RetryPolicy = Policy.Handle<Exception>().WaitAndRetryAsync(5, (retries) => TimeSpan.FromSeconds(retries + 1));
             this.systemManager = dependencies.GetService<ISystemManagement>();
-        }
-
-        /// <summary>
-        /// The version of GRID driver to be installed.
-        /// </summary>
-        public string DriverVersion
-        {
-            get
-            {
-                return this.Parameters.GetValue<string>(nameof(GridAndNvidiaDriverInstallation.DriverVersion), string.Empty);
-            }
-
-            set
-            {
-                this.Parameters[nameof(GridAndNvidiaDriverInstallation.DriverVersion)] = value;
-            }
         }
 
         /// <summary>
@@ -58,7 +44,7 @@ namespace VirtualClient.Dependencies
         {
             get
             {
-                return this.Parameters.GetValue<string>(nameof(GridAndNvidiaDriverInstallation.AzureRepository), string.Empty);
+                return this.Parameters.GetValue<string>(nameof(GridAndNvidiaDriverInstallation.AzureRepository), "https://raw.githubusercontent.com/Azure/azhpc-extensions/master/NvidiaGPU/resources.json");
             }
 
             set
@@ -82,31 +68,6 @@ namespace VirtualClient.Dependencies
                 this.Parameters[nameof(GridAndNvidiaDriverInstallation.ForwardLink)] = value;
             }
         }
-
-        /// <summary>
-        /// Determines whether Reboot is required or not after Driver installation.
-        /// </summary>
-        public bool RebootRequired
-        {
-            get
-            {
-                switch (this.Platform)
-                {
-                    case PlatformID.Unix:
-                    case PlatformID.Win32NT:
-                        return this.Parameters.GetValue<bool>(nameof(GridAndNvidiaDriverInstallation.RebootRequired), false);
-
-                    default:
-                        return this.Parameters.GetValue<bool>(nameof(GridAndNvidiaDriverInstallation.RebootRequired), true);
-                }
-            }
-        }
-
-        /// <summary>
-        /// A policy that defines how the component will retry when
-        /// it experiences transient issues.
-        /// </summary>
-        public IAsyncPolicy RetryPolicy { get; set; }
 
         /// <summary>
         /// Executes GRID driver installation steps.
@@ -167,32 +128,6 @@ namespace VirtualClient.Dependencies
             this.Logger.LogTraceMessage($"{this.TypeName}.ExecutionCompleted", telemetryContext);
         }
 
-        private async Task<bool> CheckIfDriverInstalledAsync(EventContext telemetryContext, CancellationToken cancellationToken)
-        {
-            string driverVersionCommand = this.Platform == PlatformID.Unix ? "-c nvidia-smi --query-gpu=driver_version --format=csv,noheader" : "nvidia-smi --query-gpu=driver_version --format=csv,noheader";
-            string shell = this.Platform == PlatformID.Unix ? "bash" : "powershell";
-
-            var process = await this.ExecuteCommandAsync(shell, driverVersionCommand, Environment.CurrentDirectory, telemetryContext, cancellationToken)
-                .ConfigureAwait(false);
-
-            if (ProcessProxy.DefaultSuccessCodes.Contains(process.ExitCode))
-            {
-                string driverVersion = process.StandardOutput.ToString().Trim();
-                if (driverVersion != (this.DriverVersion))
-                {
-                    this.Logger.LogWarning($"NVIDIA driver version mismatch: NVIDIA driver {driverVersion} installed mismatches tested driver version {this.DriverVersion}");
-                }
-
-                // Always log the current driver version to Events for telemetry purposes.
-                this.Logger.LogSystemEvents($"NVIDIA driver {driverVersion} detected", new Dictionary<string, object> { { "DriverVersion", process.StandardOutput.ToString().Trim() } }, telemetryContext);
-                return true;
-            }
-            else
-            {
-                return false;
-            }
-        }
-
         private async Task InstallGridDriverAsync(LinuxDistributionInfo linuxDistributionInfo, EventContext telemetryContext, CancellationToken cancellationToken)
         {
             List<string> prerequisiteCommands = this.PrerequisiteCommands(linuxDistributionInfo.LinuxDistribution);
@@ -208,40 +143,10 @@ namespace VirtualClient.Dependencies
             {
                 foreach (string command in commandsList)
                 {
-                    await this.ExecuteCommandAsync(command, null, Environment.CurrentDirectory, telemetryContext, cancellationToken)
+                    await this.ExecuteCommandAsync(command, null, Environment.CurrentDirectory, telemetryContext, cancellationToken, true)
                         .ConfigureAwait(false);
                 }
             }
-        }
-
-        private async Task HoldKernelPackage(LinuxDistribution linuxDistribution, EventContext telemetryContext, CancellationToken cancellationToken)
-        {
-            string command = string.Empty;
-
-            switch (linuxDistribution)
-            {
-                case LinuxDistribution.Ubuntu:
-                    command = "apt-mark hold";
-                    break;
-
-                case LinuxDistribution.CentOS7:
-                case LinuxDistribution.CentOS8:
-                case LinuxDistribution.RHEL7:
-                case LinuxDistribution.RHEL8:
-                    command = "dnf versionlock add";
-                    break;
-            }
-
-            var process = await this.ExecuteCommandAsync("bash -c \"uname -r\"", null, Environment.CurrentDirectory, telemetryContext, cancellationToken)
-                .ConfigureAwait(false);
-
-            string kernelVersion = process.StandardOutput.ToString();
-
-            await this.ExecuteCommandAsync($"{command} linux-image-{kernelVersion}", null, Environment.CurrentDirectory, telemetryContext, cancellationToken)
-                .ConfigureAwait(false);
-
-            await this.ExecuteCommandAsync($"{command} linux-headers-{kernelVersion}", null, Environment.CurrentDirectory, telemetryContext, cancellationToken)
-                .ConfigureAwait(false);
         }
 
         private List<string> PrerequisiteCommands(LinuxDistribution linuxDistribution)
@@ -277,11 +182,6 @@ namespace VirtualClient.Dependencies
 
             if (string.IsNullOrEmpty(this.ForwardLink))
             {
-                if (string.IsNullOrEmpty(this.AzureRepository))
-                {
-                    throw new DependencyException("Failed to find Linux local run file.");
-                }
-
                 string osDistribution = string.Empty;
                 string osVersion = string.Empty;
 
@@ -314,7 +214,7 @@ namespace VirtualClient.Dependencies
             }
 
             commands.Add("chmod +x NVIDIA-Linux-x86_64-grid.run");
-            commands.Add("sudo ./NVIDIA-Linux-x86_64-grid.run --silent");
+            commands.Add("./NVIDIA-Linux-x86_64-grid.run --silent");
 
             return commands;
         }
