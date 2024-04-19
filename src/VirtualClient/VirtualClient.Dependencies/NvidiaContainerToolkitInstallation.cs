@@ -6,7 +6,6 @@ namespace VirtualClient.Dependencies
     using System;
     using System.Collections.Generic;
     using System.Linq;
-    using System.Text.RegularExpressions;
     using System.Threading;
     using System.Threading.Tasks;
     using Microsoft.Extensions.DependencyInjection;
@@ -221,17 +220,9 @@ namespace VirtualClient.Dependencies
             if (ProcessProxy.DefaultSuccessCodes.Contains(process.ExitCode))
             {
                 string output = process.StandardOutput.ToString();
+                this.Logger.LogSystemEvents($"NVIDIA toolkit detected: {output}", new Dictionary<string, object> { { "NvidiaToolkit", output } }, telemetryContext);
 
-                string pattern = @"nvidia-container-toolkit\s+(\S+)";
-                Match match = Regex.Match(output, pattern);
-
-                if (match.Success)
-                {
-                    string version = match.Groups[1].Value;
-                    this.Logger.LogSystemEvents($"NVIDIA toolkit {version} detected", new Dictionary<string, object> { { "NvidiaToolkit", version } }, telemetryContext);
-                }
-
-                return output.Contains(NvidiaContainerToolkit);
+                return true;
             }
             else
             {
